@@ -1,5 +1,5 @@
 /* MICH Digital Shop v3 — Service Worker */
-const CACHE = 'mich-shop-v4';
+const CACHE = 'mich-shop-v6';
 const ASSETS = [
   '/',
   '/index.html',
