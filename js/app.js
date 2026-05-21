@@ -22,12 +22,162 @@ const fdb      = firebase.firestore();
 const fstorage = firebase.storage();
 
 // ════════════════════════════════════════════════════════════════
+// 1b. IMGBB IMAGE UPLOAD SYSTEM
+// ════════════════════════════════════════════════════════════════
+
+const IMGBB_API_KEY = '6bdb23b28e7581721b28e46ce313308b';
+const APP_URL       = 'https://michshoping.vercel.app';
+
+/**
+ * Upload a single File/Blob to ImgBB.
+ * Returns { url, thumb } on success or throws on failure.
+ */
+async function uploadToImgBB(file) {
+  const formData = new FormData();
+  formData.append('image', file);
+  const res  = await fetch(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, { method: 'POST', body: formData });
+  const data = await res.json();
+  if (!data.success) throw new Error(data.error?.message || 'ImgBB upload failed');
+  return { url: data.data.url, thumb: data.data.thumb?.url || data.data.url };
+}
+
+/**
+ * Show an inline ImgBB uploader widget inside containerId.
+ * onUploaded(urls[]) is called whenever new images are added.
+ * preloadedUrls = array of already-saved image URLs (for edit mode).
+ * maxImages = max allowed (default 5).
+ */
+function renderImgBBUploader(containerId, onUploaded, preloadedUrls = [], maxImages = 5) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  // State stored on container element
+  container._imgUrls = [...preloadedUrls];
+
+  function rebuild() {
+    const urls = container._imgUrls;
+    container.innerHTML = `
+      <div class="imgbb-uploader">
+        <div class="imgbb-preview" id="${containerId}-preview">
+          ${urls.map((u, i) => `
+            <div class="imgbb-thumb-wrap">
+              <img src="${u}" class="imgbb-thumb" alt="img${i+1}" />
+              <button class="imgbb-remove" onclick="__imgbbRemove('${containerId}',${i})" title="Remove">✕</button>
+            </div>`).join('')}
+          ${urls.length < maxImages ? `
+            <label class="imgbb-add ${container._uploading ? 'uploading' : ''}" for="${containerId}-file">
+              ${container._uploading
+                ? `<span class="imgbb-spinner"></span><span style="font-size:0.7rem;color:var(--text3)">Uploading...</span>`
+                : `<span style="font-size:1.8rem">📷</span><span style="font-size:0.7rem;color:var(--text3)">Add Image</span>`}
+            </label>
+            <input type="file" id="${containerId}-file" accept="image/*" multiple style="display:none"
+              onchange="__imgbbUpload('${containerId}',this.files,${maxImages})" />
+          ` : ''}
+        </div>
+        <div style="font-size:0.72rem;color:var(--text4);margin-top:4px">${urls.length}/${maxImages} images</div>
+      </div>`;
+    onUploaded([...container._imgUrls]);
+  }
+
+  rebuild();
+  container._rebuild = rebuild;
+}
+
+window.__imgbbRemove = function(containerId, idx) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container._imgUrls.splice(idx, 1);
+  container._rebuild();
+};
+
+window.__imgbbUpload = async function(containerId, files, maxImages) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const remaining = maxImages - container._imgUrls.length;
+  const toUpload  = Array.from(files).slice(0, remaining);
+  if (!toUpload.length) return;
+  container._uploading = true;
+  container._rebuild();
+  let uploaded = 0;
+  for (const file of toUpload) {
+    try {
+      const { url } = await uploadToImgBB(file);
+      container._imgUrls.push(url);
+      uploaded++;
+    } catch (e) {
+      showToast(`Image upload failed: ${e.message}`, 'error');
+    }
+  }
+  container._uploading = false;
+  container._rebuild();
+  if (uploaded) showToast(`${uploaded} image${uploaded>1?'s':''} uploaded! ✅`, 'success');
+};
+
+/**
+ * Single photo uploader — for profile photo.
+ * Calls onUploaded(url) with the uploaded ImgBB URL.
+ */
+function renderProfilePhotoUploader(containerId, currentPhotoUrl, onUploaded) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  function rebuild(uploading = false) {
+    container.innerHTML = `
+      <div class="profile-photo-uploader">
+        <div class="profile-photo-wrap">
+          ${currentPhotoUrl
+            ? `<img src="${currentPhotoUrl}" class="profile-photo-preview" id="${containerId}-img" />`
+            : `<div class="profile-photo-placeholder">${(userProfile?.name||'U').charAt(0)}</div>`}
+          <label for="${containerId}-input" class="profile-photo-btn ${uploading?'uploading':''}">
+            ${uploading
+              ? `<span class="imgbb-spinner"></span>`
+              : `<span>📷</span>`}
+          </label>
+          <input type="file" id="${containerId}-input" accept="image/*" style="display:none"
+            onchange="__profilePhotoUpload('${containerId}',this.files[0])" />
+        </div>
+        ${uploading ? `<div style="font-size:0.72rem;color:var(--blue);margin-top:6px">Uploading photo...</div>` : ''}
+      </div>`;
+  }
+
+  container._onUploaded = onUploaded;
+  container._currentUrl = currentPhotoUrl;
+  rebuild();
+  container._rebuild = rebuild;
+}
+
+window.__profilePhotoUpload = async function(containerId, file) {
+  if (!file) return;
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container._rebuild(true);
+  try {
+    const { url } = await uploadToImgBB(file);
+    container._currentUrl = url;
+    container._onUploaded(url);
+    // refresh preview
+    renderProfilePhotoUploader(containerId, url, container._onUploaded);
+    showToast('Profile photo updated! 🎉', 'success');
+  } catch(e) {
+    container._rebuild(false);
+    showToast('Photo upload failed: ' + e.message, 'error');
+  }
+};
+
+// ════════════════════════════════════════════════════════════════
 // 2. GLOBAL STATE
 // ════════════════════════════════════════════════════════════════
 
 let currentUser    = null;
 let userProfile    = null;
 let currentPage    = 'home';
+const urlParams = new URLSearchParams(window.location.search);
+
+const sharedCatalog = urlParams.get('share');
+const referralUser = urlParams.get('ref');
+
+if (referralUser) {
+  localStorage.setItem('refUser', referralUser);
+}
 let currentParams  = {};
 let allCatalogs    = [];   // cache
 let searchTimeout  = null;
@@ -282,7 +432,7 @@ function timeSince(ts) {
 }
 
 function generateShareUrl(id) {
-  return `${window.location.origin}${window.location.pathname}?share=${id}`;
+  return `${APP_URL}/?share=${id}&ref=${currentUser?.uid || ''}`;
 }
 
 function shareOnWhatsApp(catalog) {
@@ -629,7 +779,16 @@ function renderProductCards(catalogs) {
             ${c.stock===0?`<span class="product-badge" style="background:rgba(239,68,68,0.8);color:#fff">Sold Out</span>`:''}
           </div>
           <div class="product-actions">
-            <button class="product-action-btn" title="Share on WhatsApp" onclick="event.stopPropagation();shareOnWhatsApp(${JSON.stringify(c).replace(/"/g,'&quot;')})">📲</button>
+            <button class="product-action-btn"
+onclick="event.stopPropagation();shareCatalogById('${c.id}')">
+📲
+</button>
+function shareCatalogById(id) {
+  const catalog = allCatalogs.find(x => x.id === id);
+  if (!catalog) return;
+
+  shareOnWhatsApp(catalog);
+}
             <button class="product-action-btn" title="Copy Link" onclick="event.stopPropagation();copyLink('${c.id}')">🔗</button>
           </div>
         </div>
@@ -671,14 +830,18 @@ async function renderCatalogDetail(params={}) {
         <div class="img-gallery">
           <div class="img-main">
             ${c.images?.[0]
-              ? `<img id="main-img" src="${c.images[0]}" alt="${c.title}" style="width:100%;height:100%;object-fit:cover" />`
+              ? `<img id="main-img"
+src="${c.images[0]}"
+alt="${c.title}"
+style="width:100%;height:100%;object-fit:cover"
+onclick="openLightbox(0)" />`
               : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:5rem">📦</div>`}
           </div>
           ${c.images?.length > 1 ? `
             <div class="img-thumbs">
               ${c.images.map((img,i) => `
                 <div class="img-thumb ${i===0?'active':''}" onclick="switchImg('${img}',this)">
-                  <img src="${img}" alt="" />
+                  <img src="${img}" alt="" onclick="openLightbox(${i})" />
                 </div>`).join('')}
             </div>` : ''}
         </div>
@@ -788,7 +951,7 @@ async function submitOrder(catalogId, title, price, currency, profit, type) {
   const data = {
     catalogId, catalogTitle:title, price, currency,
     profit: profit > 0 ? profit : 0,
-    resellerId: currentUser?.uid || null,
+    resellerId: localStorage.getItem('refUser') || currentUser?.uid || null,
     type,
     buyerPhone:   document.getElementById('o-phone')?.value || '',
     buyerName:    document.getElementById('o-name')?.value || '',
@@ -805,7 +968,18 @@ async function submitOrder(catalogId, title, price, currency, profit, type) {
 
   if (btn) { btn.disabled = true; btn.textContent = 'Placing Order...'; }
   try {
-    await createOrder(data);
+    const orderId = await createOrder(data);
+
+if (data.profit > 0 && data.resellerId) {
+  await fdb.collection('earnings').add({
+    userId: data.resellerId,
+    orderId: orderId,
+    catalogTitle: title,
+    amount: data.profit,
+    status: 'pending',
+    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+  });
+}
     closeModalForce();
     openModal(`
       <div class="modal-body" style="text-align:center;padding:40px 24px">
@@ -1091,15 +1265,13 @@ async function renderClients() {
 async function renderProfile() {
   if (!currentUser) { navigate('auth'); return; }
   const p = userProfile || {};
-  const referralLink = `${window.location.origin}${window.location.pathname}?ref=${p.referralCode}`;
+  const referralLink = `${APP_URL}/?ref=${p.referralCode}`;
 
   setContent(`
     <div class="page">
       <!-- Header -->
       <div class="card profile-header" style="margin-bottom:20px">
-        ${p.photo
-          ? `<img src="${p.photo}" class="profile-avatar" alt="avatar" />`
-          : `<div class="profile-avatar-ph">${(p.name||'U').charAt(0)}</div>`}
+        <div id="profile-photo-uploader-container" style="display:flex;justify-content:center;margin-bottom:12px"></div>
         <div class="profile-name">${p.name||'User'}</div>
         <span class="profile-role role-${p.role||'customer'}">${p.role||'customer'}</span>
         <div style="font-size:0.85rem;color:var(--text3);margin-top:8px">${p.email||currentUser.email||''}</div>
@@ -1119,7 +1291,7 @@ async function renderProfile() {
         <div style="font-size:0.8rem;color:var(--text3);margin-bottom:12px">Invite friends and earn bonus rewards</div>
         <div class="referral-code">${p.referralCode||'LOADING'}</div>
         <div style="display:flex;gap:8px">
-          <button class="btn-outline sm referral-btn" onclick="copyLink('ref_${p.referralCode}');navigator.clipboard.writeText('${referralLink}');showToast('Referral link copied!','success')">Copy Link</button>
+          <button class="btn-outline sm referral-btn" onclick="navigator.clipboard.writeText('${referralLink}');showToast('Referral link copied!','success')">Copy Link</button>
           <button class="btn-wa referral-btn" onclick="window.open('https://wa.me/?text=${encodeURIComponent(`🤑 Join MICH Digital Shop and start earning money! Use my referral link: ${referralLink}`)}','_blank')">Share on WhatsApp</button>
         </div>
       </div>
@@ -1141,6 +1313,14 @@ async function renderProfile() {
       </div>
     </div>
   `);
+
+  // Initialize profile photo uploader
+  renderProfilePhotoUploader('profile-photo-uploader-container', p.photo || '', async (newUrl) => {
+    window._newProfilePhoto = newUrl;
+    await updateUserDoc(currentUser.uid, { photo: newUrl });
+    userProfile = await getUserDoc(currentUser.uid);
+    updateNavUI();
+  });
 }
 
 async function saveProfile() {
@@ -1333,7 +1513,7 @@ function adminTab(tab, btn) {
   const el = document.getElementById('admin-content');
   if (!el) return;
   if (tab==='orders')      el.innerHTML = renderAdminOrders(window._adminOrders||[]);
-  if (tab==='products')    el.innerHTML = renderAdminProducts(window._adminCats||[]);
+  if (tab==='products')    el.innerHTML = renderAdminProductsV3(window._adminCats||[]);
   if (tab==='users')       el.innerHTML = renderAdminUsers(window._adminUsers||[]);
   if (tab==='withdrawals') el.innerHTML = renderAdminWithdrawals(window._adminWDs||[]);
 }
@@ -1470,11 +1650,17 @@ function showAddProductModal() {
         <div class="form-group"><label class="form-label">Type</label><select class="input" id="np-type"><option value="physical">📦 Physical</option><option value="digital">⚡ Digital</option></select></div>
         <div class="form-group"><label class="form-label">Category</label><select class="input" id="np-cat"><option value="">-- Select --</option><option>mobiles</option><option>electronics</option><option>fashion</option><option>education</option><option>entertainment</option><option>software</option><option>music</option><option>giftcards</option><option>beauty</option></select></div>
       </div>
-      <div class="form-group"><label class="form-label">Image URLs (one per line)</label><textarea class="input" id="np-images" placeholder="https://example.com/image.jpg"></textarea></div>
+      <div class="form-group">
+        <label class="form-label">Product Images (Upload via ImgBB) <span style="color:var(--text4);font-weight:400">max 5</span></label>
+        <div id="np-imgbb-container"></div>
+      </div>
       <div class="form-group"><label class="form-label">Tags (comma separated)</label><input class="input" id="np-tags" placeholder="sale, trending, new" /></div>
       <button class="btn-neon btn-block" id="add-prod-btn" onclick="submitAddProduct()">Add Product</button>
     </div>
   `);
+  // Init uploader — images stored on window._npImages
+  window._npImages = [];
+  renderImgBBUploader('np-imgbb-container', (urls) => { window._npImages = urls; }, [], 5);
 }
 
 async function submitAddProduct() {
@@ -1483,8 +1669,7 @@ async function submitAddProduct() {
   if (!title || !price) { showToast('Title and price required','error'); return; }
   const btn = document.getElementById('add-prod-btn');
   if (btn) { btn.disabled=true; btn.textContent='Adding...'; }
-  const imagesRaw = document.getElementById('np-images')?.value || '';
-  const images = imagesRaw.split('\n').map(s=>s.trim()).filter(Boolean);
+  const images = window._npImages || [];
   const tagsRaw  = document.getElementById('np-tags')?.value || '';
   const tags = tagsRaw.split(',').map(s=>s.trim()).filter(Boolean);
   try {
@@ -1505,9 +1690,85 @@ async function submitAddProduct() {
     allCatalogs = await getCatalogs(100);
     const cats = window._adminCats = allCatalogs;
     const el   = document.getElementById('admin-content');
-    if (el) el.innerHTML = renderAdminProducts(cats);
+    if (el) el.innerHTML = renderAdminProductsV3(cats);
   } catch(e) { showToast('Failed to add product','error'); console.error(e); }
   if (btn) { btn.disabled=false; btn.textContent='Add Product'; }
+}
+
+async function showEditProductModal(id) {
+  const c = allCatalogs.find(x=>x.id===id) || await getCatalogById(id);
+  if (!c) { showToast('Product not found','error'); return; }
+  openModal(`
+    <div class="modal-header"><h3>✏️ Edit Product</h3><button class="modal-close" onclick="closeModalForce()">✕</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label class="form-label">Title *</label><input class="input" id="ep-title" value="${c.title||''}" /></div>
+      <div class="form-group"><label class="form-label">Description</label><textarea class="input" id="ep-desc">${c.description||''}</textarea></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group"><label class="form-label">Original Price *</label><input class="input" id="ep-price" type="number" value="${c.price||''}" /></div>
+        <div class="form-group"><label class="form-label">Reseller Price</label><input class="input" id="ep-rprice" type="number" value="${c.resellerPrice||''}" /></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group"><label class="form-label">Currency</label>
+          <select class="input" id="ep-currency">
+            ${['PKR','USD','SAR','AED','INR','EUR'].map(cur=>`<option ${c.currency===cur?'selected':''}>${cur}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group"><label class="form-label">Stock</label><input class="input" id="ep-stock" type="number" value="${c.stock||''}" /></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group"><label class="form-label">Type</label>
+          <select class="input" id="ep-type">
+            <option value="physical" ${c.type==='physical'?'selected':''}>📦 Physical</option>
+            <option value="digital"  ${c.type==='digital' ?'selected':''}>⚡ Digital</option>
+          </select>
+        </div>
+        <div class="form-group"><label class="form-label">Category</label>
+          <select class="input" id="ep-cat">
+            ${['','mobiles','electronics','fashion','education','entertainment','software','music','giftcards','beauty'].map(cat=>`<option value="${cat}" ${c.category===cat?'selected':''}>${cat||'-- Select --'}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Product Images <span style="color:var(--text4);font-weight:400">Upload or keep existing (max 5)</span></label>
+        <div id="ep-imgbb-container"></div>
+      </div>
+      <div class="form-group"><label class="form-label">Tags (comma separated)</label><input class="input" id="ep-tags" value="${(c.tags||[]).join(', ')}" /></div>
+      <button class="btn-neon btn-block" id="edit-prod-btn" onclick="submitEditProduct('${id}')">Save Changes</button>
+    </div>
+  `);
+  window._epImages = [...(c.images||[])];
+  renderImgBBUploader('ep-imgbb-container', (urls) => { window._epImages = urls; }, c.images||[], 5);
+}
+
+async function submitEditProduct(id) {
+  const title = document.getElementById('ep-title')?.value?.trim();
+  const price = parseFloat(document.getElementById('ep-price')?.value);
+  if (!title || !price) { showToast('Title and price required','error'); return; }
+  const btn = document.getElementById('edit-prod-btn');
+  if (btn) { btn.disabled=true; btn.textContent='Saving...'; }
+  const tagsRaw = document.getElementById('ep-tags')?.value || '';
+  const tags = tagsRaw.split(',').map(s=>s.trim()).filter(Boolean);
+  try {
+    await updateCatalog(id, {
+      title,
+      description: document.getElementById('ep-desc')?.value || '',
+      price,
+      resellerPrice: parseFloat(document.getElementById('ep-rprice')?.value) || price,
+      currency: document.getElementById('ep-currency')?.value || 'PKR',
+      stock: parseInt(document.getElementById('ep-stock')?.value) || 99,
+      type: document.getElementById('ep-type')?.value || 'physical',
+      category: document.getElementById('ep-cat')?.value || '',
+      images: window._epImages || [],
+      tags,
+    });
+    closeModalForce();
+    showToast('Product updated! ✅','success');
+    allCatalogs = await getCatalogs(100);
+    window._adminCats = allCatalogs;
+    const el = document.getElementById('admin-content');
+    if (el) el.innerHTML = renderAdminProductsV3(allCatalogs);
+  } catch(e) { showToast('Failed to update product','error'); console.error(e); }
+  if (btn) { btn.disabled=false; btn.textContent='Save Changes'; }
 }
 
 async function confirmDeleteProduct(id) {
@@ -1517,7 +1778,7 @@ async function confirmDeleteProduct(id) {
   allCatalogs = allCatalogs.filter(c=>c.id!==id);
   window._adminCats = allCatalogs;
   const el = document.getElementById('admin-content');
-  if (el) el.innerHTML = renderAdminProducts(allCatalogs);
+  if (el) el.innerHTML = renderAdminProductsV3(allCatalogs);
 }
 
 async function showUserActions(uid, name, role) {
@@ -1604,17 +1865,17 @@ function navigate(page, params={}) {
   updateActiveNav();
 
   switch (page) {
-    case 'home':     renderHome();                break;
-    case 'auth':     renderAuth();                break;
-    case 'catalogs': renderCatalogs(params);      break;
-    case 'catalog':  renderCatalogDetail(params); break;
-    case 'earnings': renderEarnings();            break;
-    case 'orders':   renderOrders();              break;
-    case 'clients':  renderClients();             break;
-    case 'profile':  renderProfile();             break;
-    case 'admin':    renderAdmin();               break;
-    case 'share':    renderShare(params);         break;
-    default:         renderHome();
+    case 'home':     renderHomeV3();                 break;
+    case 'auth':     renderAuth();                   break;
+    case 'catalogs': renderCatalogs(params);         break;
+    case 'catalog':  renderCatalogDetailV3(params);  break;
+    case 'earnings': renderEarnings();               break;
+    case 'orders':   renderOrders();                 break;
+    case 'clients':  renderClients();                break;
+    case 'profile':  renderProfile();                break;
+    case 'admin':    renderAdmin();                  break;
+    case 'share':    renderShareV3(params);          break;
+    default:         renderHomeV3();
   }
   closeMobileMenu();
 }
@@ -1629,6 +1890,615 @@ if ('serviceWorker' in navigator) {
 }
 
 // ════════════════════════════════════════════════════════════════
+
+// ════════════════════════════════════════════════════════════════
+// V3 UPGRADES — Lightbox · Eid Banner · Catalog Toggle
+//               Reseller Registration · Sitemap · Fast Share
+// ════════════════════════════════════════════════════════════════
+
+// ─── LIGHTBOX ────────────────────────────────────────────────────
+let _lightboxImages = [];
+let _lightboxIndex  = 0;
+
+function openLightbox(images, startIndex = 0) {
+  _lightboxImages = Array.isArray(images) ? images : [images];
+  _lightboxIndex  = startIndex;
+  updateLightbox();
+  document.getElementById('lightbox').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeLightbox() {
+  document.getElementById('lightbox').classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
+function updateLightbox() {
+  const img = document.getElementById('lightbox-img');
+  const ctr = document.getElementById('lightbox-counter');
+  if (img) img.src = _lightboxImages[_lightboxIndex];
+  if (ctr) ctr.textContent = `${_lightboxIndex + 1} / ${_lightboxImages.length}`;
+}
+
+function lightboxPrev(e) {
+  if (e) e.stopPropagation();
+  _lightboxIndex = (_lightboxIndex - 1 + _lightboxImages.length) % _lightboxImages.length;
+  updateLightbox();
+}
+
+function lightboxNext(e) {
+  if (e) e.stopPropagation();
+  _lightboxIndex = (_lightboxIndex + 1) % _lightboxImages.length;
+  updateLightbox();
+}
+
+// Keyboard navigation for lightbox
+document.addEventListener('keydown', e => {
+  const lb = document.getElementById('lightbox');
+  if (lb && !lb.classList.contains('hidden')) {
+    if (e.key === 'Escape')      closeLightbox();
+    if (e.key === 'ArrowLeft')   lightboxPrev();
+    if (e.key === 'ArrowRight')  lightboxNext();
+  }
+});
+
+// ─── EID UL ADHA COUNTDOWN ──────────────────────────────────────
+function getEidCountdown() {
+  const eidDate = new Date('2026-05-27T00:00:00');
+  const now     = new Date();
+  const diff    = eidDate - now;
+  if (diff <= 0) return null; // Eid has started
+  const days  = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+  const mins  = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+  return { days, hours, mins };
+}
+
+function renderEidHeroCard() {
+  const cd = getEidCountdown();
+  if (!cd) {
+    // Eid is here!
+    return `
+      <div class="eid-hero-card section">
+        <div class="eid-sheep-anim">🐑</div>
+        <div class="eid-hero-title">🌙 عید الاضحی مبارک! 🌙</div>
+        <div class="eid-hero-sub">Eid ul Adha Special Sale — 27-29 MAY 2026</div>
+        <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+          <button class="btn-neon lg" onclick="navigate('catalogs',{category:'eid'})">🐑 Eid Deals →</button>
+          <button class="btn-outline lg" onclick="navigate('catalogs')">Browse All</button>
+        </div>
+      </div>`;
+  }
+  return `
+    <div class="eid-hero-card section">
+      <div class="eid-sheep-anim">🐑</div>
+      <div class="eid-hero-title">🌙 Eid ul Adha Sale 🌙</div>
+      <div class="eid-hero-sub">Special discounts starting 27 MAY!</div>
+      <div class="eid-countdown">
+        <div class="eid-count-item">
+          <div class="eid-count-num">${cd.days}</div>
+          <div class="eid-count-label">Days</div>
+        </div>
+        <div class="eid-count-item" style="color:#ffd700;font-size:1.5rem;align-self:flex-start;margin-top:8px">:</div>
+        <div class="eid-count-item">
+          <div class="eid-count-num">${cd.hours}</div>
+          <div class="eid-count-label">Hours</div>
+        </div>
+        <div class="eid-count-item" style="color:#ffd700;font-size:1.5rem;align-self:flex-start;margin-top:8px">:</div>
+        <div class="eid-count-item">
+          <div class="eid-count-num">${cd.mins}</div>
+          <div class="eid-count-label">Minutes</div>
+        </div>
+      </div>
+      <button class="btn-neon" onclick="navigate('catalogs')">🛍️ Shop Now →</button>
+    </div>`;
+}
+
+// ─── CATALOG TOGGLE (Admin: On/Off) ─────────────────────────────
+async function toggleCatalogStatus(id, currentlyActive) {
+  try {
+    await fdb.collection('catalogs').doc(id).update({
+      active: !currentlyActive,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    showToast(currentlyActive ? 'Catalog hidden 🔴' : 'Catalog live 🟢', 'success');
+    // Refresh admin products list
+    allCatalogs = await getCatalogs(100);
+    window._adminCats = allCatalogs;
+    const el = document.getElementById('admin-content');
+    if (el) el.innerHTML = renderAdminProductsV3(allCatalogs);
+  } catch(e) {
+    showToast('Failed to toggle catalog', 'error');
+  }
+}
+
+// ─── RESELLER REGISTRATION FLOW ─────────────────────────────────
+function showResellerRegModal() {
+  openModal(`
+    <div class="modal-header">
+      <h3>💼 Become a Reseller</h3>
+      <button class="modal-close" onclick="closeModalForce()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="reseller-invest-card">
+        <h3>One-Time Investment</h3>
+        <div class="invest-amount">₨50</div>
+        <p style="color:var(--text3);font-size:0.85rem;margin-bottom:12px">
+          Send ₨50 to activate your Reseller account and start earning!
+        </p>
+        <div class="jazzcash-number" onclick="copyJazzCash()">
+          📱 JazzCash: 03062015326
+        </div>
+        <div style="font-size:0.72rem;color:var(--text4);margin-top:6px">Tap to copy number</div>
+      </div>
+      <div class="invest-steps">
+        <div class="invest-step">
+          <div class="invest-step-num">1</div>
+          <div class="invest-step-text">Send ₨50 to <strong>03062015326</strong> (JazzCash)</div>
+        </div>
+        <div class="invest-step">
+          <div class="invest-step-num">2</div>
+          <div class="invest-step-text">Screenshot your payment receipt</div>
+        </div>
+        <div class="invest-step">
+          <div class="invest-step-num">3</div>
+          <div class="invest-step-text">WhatsApp your screenshot to <strong>03062015326</strong></div>
+        </div>
+        <div class="invest-step">
+          <div class="invest-step-num">4</div>
+          <div class="invest-step-text">Admin will activate your Reseller account within hours!</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:20px">
+        <button class="btn-neon btn-block" onclick="window.open('https://wa.me/923062015326?text=Hi!%20I%20want%20to%20become%20a%20Reseller.%20I%20sent%20Rs50%20to%20JazzCash%2003062015326','_blank')">
+          📲 WhatsApp Admin
+        </button>
+        <button class="btn-outline btn-block" onclick="closeModalForce()">Close</button>
+      </div>
+    </div>
+  `);
+}
+
+function copyJazzCash() {
+  navigator.clipboard.writeText('03062015326').then(() => showToast('JazzCash number copied! 📋', 'success'));
+}
+
+// ─── ENHANCED SHARE with all social platforms ────────────────────
+function shareOnInstagram(catalog) {
+  const url = generateShareUrl(catalog.id);
+  navigator.clipboard.writeText(url).then(() => {
+    showToast('Link copied! Paste it in Instagram bio/story 📷', 'info');
+  });
+}
+
+function shareNative(catalog) {
+  const url  = generateShareUrl(catalog.id);
+  const sym  = CURRENCY_SYM[catalog.currency] || '₨';
+  const text = `🛍️ ${catalog.title}\n💰 Price: ${sym}${fmt(catalog.resellerPrice||catalog.price)}\n✅ Order: ${url}`;
+  if (navigator.share) {
+    navigator.share({ title: catalog.title, text, url }).catch(() => {});
+  } else {
+    navigator.clipboard.writeText(text + '\n' + url).then(() => showToast('Copied to clipboard! 📋', 'success'));
+  }
+}
+
+// ─── RENDER ENHANCED SOCIAL SHARE BUTTONS ───────────────────────
+function renderShareButtons(catalog) {
+  const catalogJson = JSON.stringify(catalog).replace(/"/g, '&quot;');
+  return `
+    <div class="social-share-row" style="margin-bottom:8px">
+      <button class="share-btn share-btn-wa" onclick="shareOnWhatsApp(${catalogJson})">📲 WhatsApp</button>
+      <button class="share-btn share-btn-tg" onclick="shareOnTelegram(${catalogJson})">✈️ Telegram</button>
+    </div>
+    <div class="social-share-row" style="margin-bottom:8px">
+      <button class="share-btn share-btn-fb" onclick="shareOnFacebook(${catalogJson})">👍 Facebook</button>
+      <button class="share-btn share-btn-copy" onclick="shareNative(${catalogJson})">🔗 Share</button>
+    </div>
+    <div class="copy-link-box">
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${generateShareUrl(catalog.id)}</span>
+      <button class="copy-link-btn" onclick="copyLink('${catalog.id}')">Copy</button>
+    </div>`;
+}
+
+// ─── SITEMAP GENERATOR ──────────────────────────────────────────
+async function generateSitemap() {
+  try {
+    const catalogs = await getCatalogs(200);
+    const baseUrl  = APP_URL;
+    const today    = new Date().toISOString().split('T')[0];
+    let xml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>${baseUrl}/</loc><lastmod>${today}</lastmod><priority>1.0</priority></url>
+  <url><loc>${baseUrl}/?page=catalogs</loc><lastmod>${today}</lastmod><priority>0.9</priority></url>
+`;
+    catalogs.forEach(c => {
+      xml += `  <url><loc>${baseUrl}/?share=${c.id}</loc><lastmod>${today}</lastmod><priority>0.8</priority></url>\n`;
+    });
+    xml += '</urlset>';
+    const blob = new Blob([xml], { type:'application/xml' });
+    const a    = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'sitemap.xml';
+    a.click();
+    showToast('Sitemap downloaded! Upload to your hosting root 🗺️', 'success');
+  } catch(e) {
+    showToast('Failed to generate sitemap', 'error');
+  }
+}
+
+// ─── ENHANCED CATALOG DETAIL with Lightbox & Better Share ───────
+async function renderCatalogDetailV3(params={}) {
+  const { id, order } = params;
+  setContent(`<div class="page"><div style="text-align:center;padding:60px 0"><div style="font-size:3rem">⏳</div><p style="color:var(--text3);margin-top:12px">Loading product...</p></div></div>`);
+
+  const c = await getCatalogById(id);
+  if (!c) {
+    setContent(`<div class="page"><div class="empty"><div class="empty-icon">😕</div><div class="empty-title">Product not found</div><button class="btn-neon sm" onclick="navigate('catalogs')">Browse Catalog</button></div></div>`);
+    return;
+  }
+
+  incrementViews(id);
+  const sym    = CURRENCY_SYM[c.currency] || '₨';
+  const price  = c.resellerPrice || c.price || 0;
+  const profit = (c.resellerPrice || 0) - (c.price || 0);
+  const isReseller = userProfile && ['reseller','marketer','admin'].includes(userProfile.role);
+  const images = c.images || [];
+
+  // Build my personal reseller share URL
+  const myShareUrl = currentUser
+    ? `${APP_URL}/?share=${id}&ref=${userProfile?.referralCode || currentUser.uid.slice(0,8)}`
+    : generateShareUrl(id);
+
+  setContent(`
+    <div class="page">
+      <button onclick="navigate('catalogs')" style="display:flex;align-items:center;gap:4px;color:var(--text3);font-size:0.875rem;margin-bottom:16px;transition:var(--transition)" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='var(--text3)'">← Back to Catalog</button>
+
+      <!-- SEO structured data for this product -->
+      <script type="application/ld+json">
+      ${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "Product",
+        "name": c.title,
+        "description": c.description || '',
+        "image": images[0] || '',
+        "offers": { "@type": "Offer", "price": price, "priceCurrency": c.currency || 'PKR', "availability": c.stock > 0 ? "InStock" : "OutOfStock" }
+      })}
+      <\/script>
+
+      <div class="detail-grid">
+        <!-- Image Gallery with Lightbox -->
+        <div class="img-gallery">
+          <div class="img-main" style="cursor:zoom-in" onclick="openLightbox(${JSON.stringify(images)}, 0)">
+            ${images[0]
+              ? `<img id="main-img" src="${images[0]}" alt="${c.title}" style="width:100%;height:100%;object-fit:cover" />`
+              : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:5rem">📦</div>`}
+          </div>
+          ${images.length > 0 ? `<div style="font-size:0.72rem;color:var(--text4);text-align:center;margin-top:4px">👆 Tap to view full size</div>` : ''}
+          ${images.length > 1 ? `
+            <div class="img-thumbs">
+              ${images.map((img, i) => `
+                <div class="img-thumb ${i===0?'active':''}" onclick="switchImgV3('${img}',this,${i},${JSON.stringify(images).replace(/"/g,'&quot;')})">
+                  <img src="${img}" alt="" />
+                </div>`).join('')}
+            </div>` : ''}
+        </div>
+
+        <!-- Info -->
+        <div>
+          ${c.category ? `<div style="font-size:0.75rem;color:var(--blue);margin-bottom:8px">📁 ${c.category}</div>` : ''}
+          <h1 style="font-size:1.5rem;font-weight:900;line-height:1.3;margin-bottom:16px">${c.title}</h1>
+
+          <!-- Price card -->
+          <div class="card" style="margin-bottom:16px">
+            <div style="display:flex;align-items:flex-end;gap:12px">
+              <div>
+                <div style="font-size:2rem;font-weight:900;color:var(--blue)">${sym}${fmt(price)}</div>
+              </div>
+              ${isReseller && profit > 0 ? `<div style="margin-left:auto;text-align:right">
+                <div style="font-size:0.72rem;color:var(--text3)">Your Profit</div>
+                <div style="font-size:1.2rem;font-weight:800;color:var(--green)">+${sym}${fmt(profit)}</div>
+              </div>` : ''}
+            </div>
+            <div style="font-size:0.75rem;color:var(--text3);margin-top:8px;display:flex;gap:12px;flex-wrap:wrap">
+              <span>👁 ${c.views || 0} views</span>
+              ${c.stock > 0 ? `<span style="color:var(--green)">✓ In Stock (${c.stock})</span>` : `<span style="color:var(--red)">Out of Stock</span>`}
+              <span class="badge badge-${c.type||'physical'}">${c.type==='digital'?'⚡ Digital':'📦 Physical'}</span>
+            </div>
+          </div>
+
+          ${c.description ? `
+          <div class="card" style="margin-bottom:16px">
+            <div style="font-size:0.8rem;color:var(--text3);font-weight:600;margin-bottom:8px">Description</div>
+            <p style="font-size:0.9rem;color:var(--text2);line-height:1.6">${c.description}</p>
+          </div>` : ''}
+
+          ${c.tags?.length ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">${c.tags.map(t=>`<span class="badge" style="background:var(--glass);color:var(--text3);border:1px solid var(--border)">#${t}</span>`).join('')}</div>` : ''}
+
+          <!-- Order Button -->
+          <button class="btn-neon btn-block" style="margin-bottom:12px;font-size:1rem;padding:14px" onclick="showOrderModal('${id}')">🛒 Order Now</button>
+
+          <!-- Share Section -->
+          <div class="card" style="margin-bottom:12px">
+            <div style="font-size:0.8rem;color:var(--text3);font-weight:600;margin-bottom:10px">📤 Share & Earn</div>
+            ${renderShareButtons(c)}
+          </div>
+
+          ${currentUser && isReseller ? `
+          <div class="card" style="margin-bottom:12px;border-color:rgba(0,212,255,0.2);background:rgba(0,212,255,0.04)">
+            <div style="font-size:0.78rem;color:var(--blue);font-weight:600;margin-bottom:8px">🔗 Your Personal Reseller Link</div>
+            <div class="copy-link-box">
+              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.75rem">${myShareUrl}</span>
+              <button class="copy-link-btn" onclick="navigator.clipboard.writeText('${myShareUrl}').then(()=>showToast('Your personal link copied! 📋','success'))">Copy</button>
+            </div>
+            <div style="font-size:0.72rem;color:var(--text4);margin-top:6px">Orders via this link are tracked to your account</div>
+          </div>` : ''}
+        </div>
+      </div>
+    </div>
+  `);
+
+  if (order) setTimeout(() => showOrderModal(id, c), 300);
+}
+
+// Enhanced switchImg that also updates lightbox context
+function switchImgV3(src, el, idx, imagesJson) {
+  const main = document.getElementById('main-img');
+  if (main) main.src = src;
+  document.querySelectorAll('.img-thumb').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  _lightboxImages = imagesJson;
+  _lightboxIndex  = idx;
+}
+
+// ─── ADMIN PRODUCT LIST — with Catalog Toggle ────────────────────
+function renderAdminProductsV3(cats) {
+  return `
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
+      <button class="btn-neon sm" onclick="showAddProductModal()">+ Add Product</button>
+      <button class="btn-outline sm" onclick="generateSitemap()">🗺️ Download Sitemap</button>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden">
+      ${cats.length === 0
+        ? `<div class="empty"><div class="empty-icon">📦</div><div class="empty-title">No products</div></div>`
+        : cats.map(c => `
+          <div class="list-item">
+            <div style="width:40px;height:40px;border-radius:10px;overflow:hidden;flex-shrink:0;background:var(--bg3)">
+              ${c.images?.[0]
+                ? `<img src="${c.images[0]}" style="width:100%;height:100%;object-fit:cover" />`
+                : '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center">📦</div>'}
+            </div>
+            <div class="list-info">
+              <div class="list-name">${c.title}</div>
+              <div class="list-sub">₨${fmt(c.resellerPrice||c.price)} · ${c.type||'physical'} · 👁 ${c.views||0}</div>
+            </div>
+            <div style="display:flex;gap:6px;align-items:center">
+              <!-- On/Off Toggle -->
+              <div class="catalog-toggle" onclick="toggleCatalogStatus('${c.id}',${!!c.active})" title="${c.active ? 'Click to hide' : 'Click to show'}">
+                <div class="toggle-switch ${c.active ? 'on' : ''}"></div>
+              </div>
+              <button class="btn-outline sm" onclick="showEditProductModal('${c.id}')">Edit</button>
+              <button class="btn-red sm" style="padding:6px 10px;border-radius:8px;font-size:0.78rem" onclick="confirmDeleteProduct('${c.id}')">Del</button>
+            </div>
+          </div>`).join('')}
+    </div>`;
+}
+
+// ─── RENDER HOME V3 with Eid Banner ─────────────────────────────
+async function renderHomeV3() {
+  const eidSection = renderEidHeroCard();
+
+  setContent(`
+    <div class="page" style="padding-top:0;padding-left:0;padding-right:0;max-width:100%">
+      <!-- Hero -->
+      <section class="hero">
+        <div class="hero-orb hero-orb-1"></div>
+        <div class="hero-orb hero-orb-2"></div>
+        <div class="hero-orb hero-orb-3"></div>
+        <div class="hero-content">
+          <div class="hero-badge"><span class="pulse-dot"></span> Pakistan's #1 Reseller Marketplace</div>
+          <h1>Sell Products,<br><span class="gradient-text">Earn Money</span><br><span style="color:var(--text2)">From Anywhere</span></h1>
+          <p>Join 1,200+ resellers already earning daily with physical &amp; digital products. Share, sell, grow.</p>
+          <div class="hero-btns">
+            ${currentUser
+              ? `<button class="btn-neon lg" onclick="navigate('catalogs')">Browse Products →</button>
+                 <button class="btn-outline lg" onclick="navigate('earnings')">My Earnings 💰</button>`
+              : `<button class="btn-neon lg" onclick="navigate('auth')">Start Earning Free 🚀</button>
+                 <button class="btn-outline lg" onclick="navigate('catalogs')">Browse Products</button>`}
+          </div>
+          <div class="hero-stats">
+            <div><div class="hero-stat-val gradient-text">500+</div><div class="hero-stat-label">Products</div></div>
+            <div><div class="hero-stat-val gradient-text">1,200+</div><div class="hero-stat-label">Resellers</div></div>
+            <div><div class="hero-stat-val gradient-text">₨50L+</div><div class="hero-stat-label">Paid Out</div></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="page" style="padding-top:8px">
+        <!-- Eid ul Adha Banner -->
+        ${eidSection}
+
+        <!-- Reseller CTA if not logged in or is customer -->
+        ${!currentUser || userProfile?.role === 'customer' ? `
+        <div class="card" style="margin-bottom:24px;border-color:rgba(0,212,255,0.2);background:linear-gradient(135deg,rgba(0,212,255,0.04),rgba(139,92,246,0.04));text-align:center;padding:20px">
+          <div style="font-size:2rem;margin-bottom:8px">💼</div>
+          <div style="font-weight:800;font-size:1rem;margin-bottom:4px">Become a <span class="gradient-text">Reseller</span></div>
+          <div style="font-size:0.8rem;color:var(--text3);margin-bottom:12px">Only ₨50 investment — Earn on every sale!</div>
+          <button class="btn-neon sm" onclick="showResellerRegModal()">Join as Reseller →</button>
+        </div>` : ''}
+
+        <!-- Live Stats -->
+        <div class="section">
+          <div class="section-head">
+            <div><div class="section-title">📊 Live <span class="gradient-text">Statistics</span></div></div>
+            <div style="display:flex;align-items:center;gap:6px;font-size:0.78rem;color:var(--blue)">
+              <div class="pulse-dot" style="width:6px;height:6px"></div> Live
+            </div>
+          </div>
+          <div class="counters-grid" id="counters-grid">
+            ${[
+              {icon:'📦',label:'Products',val:'500+',color:'var(--blue)'},
+              {icon:'👥',label:'Resellers',val:'1,200+',color:'var(--purple)'},
+              {icon:'🛒',label:'Orders',val:'8,500+',color:'var(--orange)'},
+              {icon:'💰',label:'Paid Out',val:'₨50L+',color:'var(--green)'},
+              {icon:'📤',label:'Daily Shares',val:'350+',color:'var(--pink)'},
+              {icon:'⭐',label:'Happy Clients',val:'4,200+',color:'var(--yellow)'},
+            ].map(c => `
+              <div class="card counter-card">
+                <div class="counter-icon">${c.icon}</div>
+                <div class="counter-val" style="color:${c.color}">${c.val}</div>
+                <div class="counter-label">${c.label}</div>
+              </div>`).join('')}
+          </div>
+        </div>
+
+        <!-- Categories -->
+        <div class="section">
+          <div class="section-head">
+            <div><div class="section-title">🗂️ <span class="gradient-text">Categories</span></div></div>
+            <a class="section-link" onclick="navigate('catalogs')">All →</a>
+          </div>
+          <div class="cat-scroll">
+            ${[
+              {icon:'🐑',label:'Eid Deals',slug:'eid'},
+              {icon:'📱',label:'Mobiles',slug:'mobiles'},
+              {icon:'💻',label:'Electronics',slug:'electronics'},
+              {icon:'👗',label:'Fashion',slug:'fashion'},
+              {icon:'🎓',label:'Education',slug:'education'},
+              {icon:'🎬',label:'Entertainment',slug:'entertainment'},
+              {icon:'💻',label:'Software',slug:'software'},
+              {icon:'🎵',label:'Music',slug:'music'},
+              {icon:'🎁',label:'Gift Cards',slug:'giftcards'},
+              {icon:'💄',label:'Beauty',slug:'beauty'},
+              {icon:'⚡',label:'Digital',slug:'digital'},
+            ].map(c => `
+              <div class="cat-chip" onclick="navigate('catalogs',{category:'${c.slug}'})">
+                <span class="cat-chip-icon">${c.icon}</span>
+                <span class="cat-chip-label">${c.label}</span>
+              </div>`).join('')}
+          </div>
+        </div>
+
+        <!-- Trending Products -->
+        <div class="section">
+          <div class="section-head">
+            <div>
+              <div class="section-title">⚡ Trending <span class="gradient-text">Products</span></div>
+              <div class="section-subtitle">Hot sellers right now</div>
+            </div>
+            <a class="section-link" onclick="navigate('catalogs')">View all →</a>
+          </div>
+          <div class="products-grid" id="trending-grid">
+            ${skeletonCards(6)}
+          </div>
+        </div>
+
+        <!-- All Products -->
+        <div class="section">
+          <div class="section-head">
+            <div>
+              <div class="section-title">🛍️ Latest <span class="gradient-text">Products</span></div>
+              <div class="section-subtitle" id="products-count">Loading...</div>
+            </div>
+            <a class="section-link" onclick="navigate('catalogs')">See all →</a>
+          </div>
+          <div class="products-grid" id="home-products-grid">
+            ${skeletonCards(8)}
+          </div>
+        </div>
+
+        ${!currentUser ? `
+        <div class="card" style="text-align:center;padding:40px 24px;margin-bottom:24px;border-color:rgba(0,212,255,0.2);background:linear-gradient(135deg,rgba(0,212,255,0.06),rgba(139,92,246,0.06))">
+          <div style="font-size:3rem;margin-bottom:12px">🚀</div>
+          <h2 style="font-size:1.5rem;font-weight:900;margin-bottom:8px">Start Earning Today — <span class="gradient-text">It's Free!</span></h2>
+          <p style="color:var(--text3);margin-bottom:20px;max-width:400px;margin-left:auto;margin-right:auto">Join thousands of resellers. Only ₨50 to activate reseller mode. Start sharing in minutes.</p>
+          <button class="btn-neon lg" onclick="navigate('auth')">⭐ Create Free Account</button>
+        </div>` : ''}
+      </div>
+    </div>
+  `);
+
+  // Load products async
+  const catalogs = await getCatalogs(20);
+  allCatalogs = catalogs;
+  const el1 = document.getElementById('trending-grid');
+  const el2 = document.getElementById('home-products-grid');
+  const cnt  = document.getElementById('products-count');
+  if (el1) el1.innerHTML = renderProductCards(catalogs.slice(0, 6));
+  if (el2) el2.innerHTML = renderProductCards(catalogs);
+  if (cnt) cnt.textContent = `${catalogs.length} products available`;
+}
+
+// ─── ENHANCED SHARE PAGE (customer-friendly) ─────────────────────
+async function renderShareV3(params={}) {
+  const { id } = params;
+  setContent(`<div class="page"><div style="text-align:center;padding:80px 0"><div style="font-size:3rem">⏳</div></div></div>`);
+  const c = await getCatalogById(id);
+  if (!c) {
+    setContent(`<div class="page"><div class="empty"><div class="empty-icon">😕</div><div class="empty-title">Product not found</div><button class="btn-neon sm" onclick="navigate('home')">Go Home</button></div></div>`);
+    return;
+  }
+  incrementViews(id);
+  const sym    = CURRENCY_SYM[c.currency] || '₨';
+  const price  = c.resellerPrice || c.price || 0;
+  const images = c.images || [];
+
+  // Track ref code if present
+  const urlP = new URLSearchParams(window.location.search);
+  const ref   = urlP.get('ref');
+
+  setContent(`
+    <div style="min-height:100vh;background:var(--bg)">
+      <!-- Share hero -->
+      <div style="position:relative;overflow:hidden;padding:48px 20px 32px;text-align:center">
+        <div class="hero-orb hero-orb-1" style="opacity:0.1"></div>
+        <div class="hero-orb hero-orb-2" style="opacity:0.08"></div>
+
+        <div style="max-width:500px;margin:0 auto">
+          ${images.length > 0 ? `
+            <div style="position:relative;width:220px;height:220px;margin:0 auto 20px">
+              <img src="${images[0]}" class="share-img" alt="${c.title}"
+                style="width:220px;height:220px;cursor:zoom-in"
+                onclick="openLightbox(${JSON.stringify(images)}, 0)" />
+              ${images.length > 1 ? `
+                <div style="position:absolute;bottom:8px;right:8px;background:rgba(0,0,0,0.7);border-radius:20px;padding:3px 8px;font-size:0.7rem;color:#fff">
+                  +${images.length - 1} more
+                </div>` : ''}
+            </div>
+          ` : '<div style="width:200px;height:200px;border-radius:28px;background:var(--bg3);display:flex;align-items:center;justify-content:center;font-size:5rem;margin:0 auto 24px">📦</div>'}
+
+          ${images.length > 1 ? `
+            <div style="display:flex;gap:8px;justify-content:center;margin-bottom:16px;overflow-x:auto;padding:4px">
+              ${images.map((img, i) => `
+                <img src="${img}" style="width:52px;height:52px;border-radius:8px;object-fit:cover;cursor:zoom-in;border:2px solid ${i===0?'var(--blue)':'var(--border)'};flex-shrink:0"
+                  onclick="openLightbox(${JSON.stringify(images)}, ${i})" />`).join('')}
+            </div>
+            <div style="font-size:0.7rem;color:var(--text4);margin-bottom:12px">👆 Tap images to view full size</div>
+          ` : ''}
+
+          <span class="badge badge-${c.type||'physical'}" style="margin-bottom:12px">${c.type==='digital'?'⚡ Digital':'📦 Physical'}</span>
+          <h1 style="font-size:1.6rem;font-weight:900;margin:12px 0">${c.title}</h1>
+          ${c.description ? `<p style="color:var(--text3);font-size:0.9rem;margin-bottom:16px;line-height:1.6">${c.description}</p>` : ''}
+          <div class="share-price">${sym}${fmt(price)}</div>
+
+          <div style="margin-top:24px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+            <button class="btn-neon lg" onclick="showOrderModal('${id}')">🛒 Order Now</button>
+          </div>
+
+          <!-- Tags -->
+          ${c.tags?.length ? `<div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:16px">${c.tags.map(t=>`<span class="badge" style="background:var(--glass);color:var(--text3)">#${t}</span>`).join('')}</div>` : ''}
+
+          <!-- Powered by -->
+          <div style="margin-top:32px;padding-top:20px;border-top:1px solid var(--border2)">
+            <div style="font-size:0.72rem;color:var(--text4);margin-bottom:6px">Powered by</div>
+            <a onclick="navigate('home')" style="font-weight:800;font-size:0.9rem" class="gradient-text">MICH Digital Shop</a>
+            <div style="font-size:0.72rem;color:var(--text4);margin-top:4px">Pakistan's #1 Reseller Marketplace</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
 // 9. INIT
 // ════════════════════════════════════════════════════════════════
 
@@ -1670,3 +2540,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 });
+function openFullImage(src){
+
+  const div = document.createElement("div");
+  div.className = "full-image-view";
+
+  div.innerHTML = `
+    <div class="full-image-close">×</div>
+    <img src="${src}">
+  `;
+
+  div.onclick = () => div.remove();
+
+  document.body.appendChild(div);
+}
