@@ -1,10 +1,9 @@
 /* MICH Digital Shop v3 — Service Worker */
-const CACHE = 'mich-shop-v4';
+const CACHE = 'mich-shop-v5';
 const ASSETS = [
   '/',
   '/index.html',
   '/css/styles.css',
-  '/js/app.js',
   '/manifest.json',
   '/sitemap.xml',
   'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap',
