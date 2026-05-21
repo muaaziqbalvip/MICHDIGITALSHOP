@@ -783,12 +783,7 @@ function renderProductCards(catalogs) {
 onclick="event.stopPropagation();shareCatalogById('${c.id}')">
 📲
 </button>
-function shareCatalogById(id) {
-  const catalog = allCatalogs.find(x => x.id === id);
-  if (!catalog) return;
 
-  shareOnWhatsApp(catalog);
-}
             <button class="product-action-btn" title="Copy Link" onclick="event.stopPropagation();copyLink('${c.id}')">🔗</button>
           </div>
         </div>
@@ -807,7 +802,12 @@ function shareCatalogById(id) {
       </div>`;
   }).join('');
 }
+function shareCatalogById(id) {
+  const catalog = allCatalogs.find(x => x.id === id);
+  if (!catalog) return;
 
+  shareOnWhatsApp(catalog);
+}
 // ─── CATALOG DETAIL ──────────────────────────────────────────────
 async function renderCatalogDetail(params={}) {
   const { id, order } = params;
